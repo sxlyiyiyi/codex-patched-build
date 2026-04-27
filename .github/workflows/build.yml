@@ -13,6 +13,7 @@ jobs:
         with:
           repository: openai/codex
           ref: rust-v0.125.0-alpha.3
+          fetch-depth: 1
 
       - name: Install Linux build dependencies
         run: |
@@ -22,91 +23,28 @@ jobs:
             pkg-config \
             libcap-dev
 
-      - name: Patch tcp_user_timeout
+      - name: Fetch and verify tcp_user_timeout fix
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import sys
+          git fetch https://github.com/ikingye/codex.git fix/disable-reqwest-tcp-user-timeout
 
-          candidates = [
-              Path("codex-rs/login/src/auth/default_client.rs"),
-              Path("codex-rs/core/src/default_client.rs"),
-          ]
+          PATCH_SHA="$(git rev-parse FETCH_HEAD)"
+          echo "Fetched patch SHA: $PATCH_SHA"
 
-          p = next((x for x in candidates if x.exists()), None)
+          test "$PATCH_SHA" = "9ef5ccd66c1aa710ce521a18ef8f618c650c553d"
 
-          if p is None:
-              print("Cannot find default_client.rs. Existing matches:")
-              for x in Path("codex-rs").rglob("default_client.rs"):
-                  print("  ", x)
-              sys.exit(1)
+      - name: Apply tcp_user_timeout fix
+        run: |
+          git cherry-pick --no-commit FETCH_HEAD
 
-          print(f"Patching: {p}")
+          echo "Changed files:"
+          git diff --name-only
 
-          s = p.read_text()
+          echo "Verifying patch content:"
+          grep -n "disable_reqwest_tcp_user_timeout" codex-rs/login/src/auth/default_client.rs
+          grep -n "tcp_user_timeout(None)" codex-rs/login/src/auth/default_client.rs
+          grep -n "builder = disable_reqwest_tcp_user_timeout(builder);" codex-rs/login/src/auth/default_client.rs
 
-          if "DEFAULT_TCP_USER_TIMEOUT" in s:
-              print("Patch already applied; skip.")
-          else:
-              import_anchor = "use std::sync::RwLock;\n"
-              import_patch = (
-                  "use std::sync::RwLock;\n"
-                  "#[cfg(any(target_os = \"android\", target_os = \"fuchsia\", target_os = \"linux\"))]\n"
-                  "use std::time::Duration;\n"
-              )
-
-              if import_anchor in s:
-                  s = s.replace(import_anchor, import_patch, 1)
-              else:
-                  import_anchor_alt = "use std::sync::RwLock;"
-                  if import_anchor_alt not in s:
-                      raise SystemExit("Cannot find RwLock import insertion point")
-                  s = s.replace(import_anchor_alt, import_patch, 1)
-
-              const_anchor = 'pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";\n'
-              const_patch = (
-                  'pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";\n'
-                  "#[cfg(any(target_os = \"android\", target_os = \"fuchsia\", target_os = \"linux\"))]\n"
-                  "const DEFAULT_TCP_USER_TIMEOUT: Duration = Duration::from_secs(300);\n"
-              )
-
-              if const_anchor in s:
-                  s = s.replace(const_anchor, const_patch, 1)
-              else:
-                  const_anchor_alt = 'pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";'
-                  const_patch_alt = (
-                      const_anchor_alt
-                      + "\n#[cfg(any(target_os = \"android\", target_os = \"fuchsia\", target_os = \"linux\"))]\n"
-                      + "const DEFAULT_TCP_USER_TIMEOUT: Duration = Duration::from_secs(300);"
-                  )
-                  if const_anchor_alt not in s:
-                      raise SystemExit("Cannot find RESIDENCY_HEADER_NAME insertion point")
-                  s = s.replace(const_anchor_alt, const_patch_alt, 1)
-
-              marker = ".default_headers(default_headers());"
-              if marker not in s:
-                  raise SystemExit("Cannot find reqwest builder .default_headers(...) insertion point")
-
-              insert = (
-                  "\n\n"
-                  "    // Workaround for long-running remote compaction requests on Linux.\n"
-                  "    #[cfg(any(target_os = \"android\", target_os = \"fuchsia\", target_os = \"linux\"))]\n"
-                  "    {\n"
-                  "        builder = builder.tcp_user_timeout(DEFAULT_TCP_USER_TIMEOUT);\n"
-                  "    }"
-              )
-
-              idx = s.find(marker) + len(marker)
-              s = s[:idx] + insert + s[idx:]
-
-              p.write_text(s)
-              print("Patch applied.")
-
-          print("Patch verification:")
-          for i, line in enumerate(p.read_text().splitlines(), start=1):
-              if "DEFAULT_TCP_USER_TIMEOUT" in line or "tcp_user_timeout" in line:
-                  print(f"{i}: {line}")
-          PY
+          git diff --check
 
       - name: Build Codex binary
         working-directory: codex-rs
