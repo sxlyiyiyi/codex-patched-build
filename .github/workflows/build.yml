@@ -14,6 +14,14 @@ jobs:
           repository: openai/codex
           ref: rust-v0.125.0-alpha.3
 
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libcap-dev
+
       - name: Patch tcp_user_timeout
         run: |
           python3 - <<'PY'
@@ -105,12 +113,18 @@ jobs:
         run: |
           cargo build --release --bin codex
 
+      - name: Verify built binary
+        run: |
+          ./codex-rs/target/release/codex --version
+          ls -lh ./codex-rs/target/release/codex
+
       - name: Package binary
         run: |
           mkdir -p out
           cp codex-rs/target/release/codex out/codex
           chmod +x out/codex
           tar -czf codex-patched-linux-x86_64.tar.gz -C out codex
+          ls -lh codex-patched-linux-x86_64.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
