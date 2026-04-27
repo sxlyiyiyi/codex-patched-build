@@ -1,0 +1,76 @@
+name: Build patched Codex
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Codex source
+        uses: actions/checkout@v4
+        with:
+          repository: openai/codex
+          ref: rust-v0.125.0-alpha.3
+
+      - name: Patch tcp_user_timeout
+        working-directory: codex-rs
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("core/src/default_client.rs")
+          s = p.read_text()
+
+          if "DEFAULT_TCP_USER_TIMEOUT" in s:
+              print("Patch already applied; skip.")
+          else:
+              old1 = "use std::sync::RwLock;\n"
+              new1 = "use std::sync::RwLock;\nuse std::time::Duration;\n"
+              if old1 not in s:
+                  raise SystemExit("Cannot find import insertion point")
+              s = s.replace(old1, new1)
+
+              old2 = 'pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";\n'
+              new2 = (
+                  'pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";\n'
+                  'const DEFAULT_TCP_USER_TIMEOUT: Duration = Duration::from_secs(300);\n'
+              )
+              if old2 not in s:
+                  raise SystemExit("Cannot find constant insertion point")
+              s = s.replace(old2, new2)
+
+              old3 = "        .default_headers(default_headers());\n"
+              new3 = (
+                  "        .default_headers(default_headers());\n\n"
+                  "    // Workaround for long-running remote compaction requests on Linux.\n"
+                  "    builder = builder.tcp_user_timeout(DEFAULT_TCP_USER_TIMEOUT);\n"
+              )
+              if old3 not in s:
+                  raise SystemExit("Cannot find reqwest builder insertion point")
+              s = s.replace(old3, new3)
+
+              p.write_text(s)
+              print("Patch applied.")
+          PY
+
+          grep -n "DEFAULT_TCP_USER_TIMEOUT\|tcp_user_timeout" core/src/default_client.rs
+
+      - name: Build Codex binary
+        working-directory: codex-rs
+        run: |
+          cargo build --release --bin codex
+
+      - name: Package binary
+        run: |
+          mkdir -p out
+          cp codex-rs/target/release/codex out/codex
+          chmod +x out/codex
+          tar -czf codex-patched-linux-x86_64.tar.gz -C out codex
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-patched-linux-x86_64
+          path: codex-patched-linux-x86_64.tar.gz
